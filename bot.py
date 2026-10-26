@@ -1,12 +1,6 @@
-
 import time, random, os, json, threading
 from flask import Flask
-try:
-    from curl_cffi import requests
-    USE_CURL=True
-except:
-    import requests
-    USE_CURL=False
+import requests
 
 SEARCH_TEXT = os.getenv("SEARCH_TEXT", "nintendo switch")
 DOMAIN = os.getenv("DOMAIN", "it")
@@ -17,7 +11,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Vinted bot online - monitoring: " + SEARCH_TEXT
+    return f"Vinted bot online - monitoring: {SEARCH_TEXT} - last check {time.strftime('%H:%M:%S')}"
 
 @app.route("/health")
 def health():
@@ -32,16 +26,15 @@ def fetch_first():
         "Referer": f"https://www.vinted.{DOMAIN}/catalog?search_text={SEARCH_TEXT.replace(' ','+')}&order=newest_first"
     }
     try:
-        kw = {"headers": h, "timeout": 20}
-        if USE_CURL:
-            kw["impersonate"] = "chrome124"
-        r = requests.get(url, **kw)
+        r = requests.get(url, headers=h, timeout=20)
         if r.status_code != 200:
-            print(f"Status {r.status_code}")
+            print(f"[{time.strftime('%H:%M:%S')}] ❌ Status {r.status_code}")
             return None
         data = r.json()
         items = data.get('items') or []
-        if not items: return None
+        if not items:
+            print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Nessun risultato per '{SEARCH_TEXT}'")
+            return None
         f = items[0]
         price = f.get('price') or f.get('price_numeric') or ""
         if isinstance(price, dict):
@@ -57,13 +50,14 @@ def fetch_first():
             "photo": photo
         }
     except Exception as e:
-        print(f"Errore fetch: {e}")
+        print(f"[{time.strftime('%H:%M:%S')}] ❌ Errore fetch: {e}")
         return None
 
 def send_discord(item):
-    if not WEBHOOK_URL: return
+    if not WEBHOOK_URL:
+        return
     embed = {
-        "title": f"🔔 NUOVO IN ALTO SU VINTED!\n{item['title'][:200]}",
+        "title": f"\u0001f514 NUOVO IN ALTO SU VINTED!\n{item['title'][:200]}",
         "url": item['url'],
         "description": f"**Prezzo:** {item['price']}\n**Ricerca:** `{SEARCH_TEXT}`\n[Apri su Vinted]({item['url']})",
         "color": 0x09B1BA,
@@ -72,39 +66,45 @@ def send_discord(item):
     }
     try:
         requests.post(WEBHOOK_URL, json={"embeds":[embed]}, timeout=15)
-        print(f"Inviato {item['id']}")
+        print(f"[{time.strftime('%H:%M:%S')}] \u2705 Inviato su Discord ID {item['id']} - {item['title'][:50]}")
     except Exception as e:
         print(f"Discord error {e}")
 
 def loop_monitor():
-    print(f"Avvio monitor Vinted - filtro: '{SEARCH_TEXT}' su vinted.{DOMAIN}")
-    # carica ultimo id
+    print(f"[{time.strftime('%H:%M:%S')}] \u0001f680 Avvio monitor Vinted - filtro: '{SEARCH_TEXT}' su vinted.{DOMAIN}")
     last_id = None
     if os.path.exists(STORAGE_FILE):
         try:
             with open(STORAGE_FILE) as f:
                 last_id = json.load(f).get('id')
+                print(f"Ultimo ID salvato: {last_id}")
         except: pass
-    
-    # invio avvio
+
     if WEBHOOK_URL:
         try:
-            requests.post(WEBHOOK_URL, json={"content": f"✅ Bot avviato! Monitoro **{SEARCH_TEXT}** su vinted.{DOMAIN} - ti avviso solo se cambia il primo annuncio."}, timeout=10)
+            requests.post(WEBHOOK_URL, json={"content": f"\u2705 Bot avviato! Monitoro **{SEARCH_TEXT}** su vinted.{DOMAIN} - ti avviso solo se cambia il primo annuncio. Controllo ogni ~30s."}, timeout=10)
         except: pass
 
     while True:
         first = fetch_first()
-        if first and first['id'] != last_id:
-            print(f"Cambio rilevato: {last_id} -> {first['id']}")
-            send_discord(first)
-            last_id = first['id']
-            try:
-                with open(STORAGE_FILE,'w') as f:
-                    json.dump({"id": last_id}, f)
-            except: pass
+        now = time.strftime('%H:%M:%S')
+        if first:
+            print(f"[{now}] \u0001f50d Check: primo ID {first['id']} | {first['title'][:60]} | {first['price']}")
+            if first['id'] != last_id:
+                print(f"[{now}] \u0001f6a8 CAMBIO RILEVATO! {last_id} -> {first['id']}")
+                send_discord(first)
+                last_id = first['id']
+                try:
+                    with open(STORAGE_FILE,'w') as f:
+                        json.dump({"id": last_id}, f)
+                except: pass
+            else:
+                print(f"[{now}] \U0001f634 Nessun cambio, dormo 30s...")
+        else:
+            print(f"[{now}] \u26a0\ufe0f Nessun dato, riprovo tra poco")
+
         time.sleep(random.randint(25,40))
 
-# Avvia monitor in background
 threading.Thread(target=loop_monitor, daemon=True).start()
 
 if __name__ == "__main__":
