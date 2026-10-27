@@ -48,9 +48,9 @@ def build_api_url():
         api_params["order"] = "newest_first"
         api_params["per_page"] = "5"
         api_params["time"] = str(ts)
-        # Se non c'è search_text, usa SEARCH_TEXT come fallback
-        if "search_text" not in api_params and SEARCH_TEXT:
-            api_params["search_text"] = SEARCH_TEXT
+        # Se VINTED_URL è impostato, NON aggiungere search_text di fallback
+        # L'utente vuole filtrare solo per categoria/prezzo. Aggiungi search_text solo se è già nel VINTED_URL
+        # Se invece vuoi anche search_text, mettilo direttamente nel VINTED_URL: &search_text=nintendo+switch
         
         query = urlencode(api_params, doseq=True)
         url = f"{base}?{query}"
