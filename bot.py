@@ -35,7 +35,7 @@ def get_session():
             print("🍪 Prendo cookie da vinted.it...")
             kw = {"timeout": 20}
             if USE_CURL:
-                kw["impersonate"] = "chrome124"
+                kw["impersonate"] = "chrome131"
             # Visita homepage per ottenere cookie anonimi
             session.get(f"https://www.vinted.{DOMAIN}/", headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
@@ -68,7 +68,7 @@ def build_api_url():
         # Vinted vuole almeno search_text o catalog_ids, altrimenti da 404
         # Se l'utente ha messo solo price_from/to senza categoria e senza testo, aggiungiamo search_text generico
         if "search_text" not in api_params and "catalog_ids" not in api_params:
-            api_params["search_text"] = "a"
+            api_params["search_text"] = "nike"
         # NON aggiungere search_text se non c'è nel link
         query = urlencode(api_params, doseq=True)
         url = f"{base}?{query}"
@@ -77,7 +77,7 @@ def build_api_url():
         return url, referer
     else:
         params = {
-            "search_text": SEARCH_TEXT or "a",
+            "search_text": SEARCH_TEXT or "nike",
             "order": "newest_first",
             "per_page": "20",
             "time": str(ts)
@@ -105,7 +105,7 @@ def fetch_first():
         sess = get_session()
         kw = {"headers": h, "timeout": 25}
         if USE_CURL:
-            kw["impersonate"] = "chrome124"
+            kw["impersonate"] = "chrome131"
         
         r = sess.get(url, **kw)
         print(f"[{time.strftime('%H:%M:%S')}] 🌐 Status {r.status_code} - URL: {url[:100]}")
@@ -113,11 +113,52 @@ def fetch_first():
         if r.status_code != 200:
             print(f"   Body preview: {r.text[:500]}")
             last_check_info["debug"] = f"Status {r.status_code}: {r.text[:200]}"
-            # Se 401/403, resetta sessione
             if r.status_code in [401, 403, 429]:
                 global session
                 session = None
-            return None
+            # Se 404, prova senza filtri prezzo (Vinted blocca price-only)
+            if r.status_code == 404 and ("price_from" in url or "price_to" in url):
+                print("   ⚠️ 404 con filtri prezzo, riprovo senza prezzo...")
+                try:
+                    # Rimuovi price_from/to e riprova
+                    from urllib.parse import urlencode, parse_qs, urlparse
+                    parsed = urlparse(url)
+                    qs = parse_qs(parsed.query)
+                    qs.pop("price_from", None)
+                    qs.pop("price_to", None)
+                    # Assicura search_text
+                    if "search_text" not in qs:
+                        qs["search_text"] = ["nike"]
+                    new_qs = urlencode({k: v[0] if isinstance(v, list) else v for k, v in qs.items()}, doseq=True)
+                    new_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_qs}"
+                    print(f"   🔁 Retry URL: {new_url[:120]}")
+                    r2 = sess.get(new_url, headers=h, timeout=25, impersonate="chrome131" if USE_CURL else None)
+                    print(f"   Retry status {r2.status_code}")
+                    if r2.status_code == 200:
+                        try:
+                            data2 = r2.json()
+                            items2 = data2.get('items') or []
+                            if items2:
+                                print(f"   ✅ Retry trovato {len(items2)} items!")
+                                # usa questo risultato
+                                data = data2
+                                items = items2
+                                # vai avanti, non ritornare None
+                                r = r2
+                            else:
+                                last_check_info["debug"] = f"Retry 0 items dopo 404"
+                                return None
+                        except:
+                            pass
+                    else:
+                        return None
+                except Exception as e:
+                    print(f"   Retry errore: {e}")
+                    return None
+            else:
+                if r.status_code == 404:
+                    last_check_info["debug"] = f"Status 404 - endpoint cambiato, prova SEARCH_TEXT= nike senza prezzo"
+                return None
         
         try:
             data = r.json()
