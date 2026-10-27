@@ -1,6 +1,7 @@
 import time, random, os, json, threading
 from urllib.parse import urlparse, parse_qs, urlencode
 from flask import Flask
+import html
 
 SEARCH_TEXT = os.getenv("SEARCH_TEXT", "nintendo switch")
 DOMAIN = os.getenv("DOMAIN", "it")
@@ -137,19 +138,24 @@ def send_discord(item):
 
 @app.route("/")
 def home():
+    filtro_display = html.escape(VINTED_URL if VINTED_URL else SEARCH_TEXT)
+    api_display = html.escape(last_check_info['current_filter'])
+    title_display = html.escape(last_check_info['last_title'] or "")
     return f"""
     <h1>Vinted Bot Online ✅</h1>
-    <p><b>Filtro attivo:</b> {VINTED_URL if VINTED_URL else SEARCH_TEXT}</p>
-    <p><b>Domain:</b> vinted.{DOMAIN}</p>
-    <p><b>Ultimo check:</b> {last_check_info['last_check']}</p>
-    <p><b>Ultimo ID:</b> {last_check_info['last_id']} - {last_check_info['last_title']}</p>
-    <p><b>API URL:</b> {last_check_info['current_filter']}</p>
+    <p><b>Filtro attivo:</b> {filtro_display}</p>
+    <p><b>Domain:</b> {html.escape(DOMAIN)}</p>
+    <p><b>Ultimo check:</b> {html.escape(last_check_info['last_check'])}</p>
+    <p><b>Ultimo ID:</b> {html.escape(str(last_check_info['last_id']))} - {title_display}</p>
+    <p><b>API URL:</b> {api_display}</p>
+    <p><b>Stato:</b> {"❌ Nessun risultato per questo filtro! Prova a togliere catalog o prezzo" if last_check_info['last_id'] is None and last_check_info['last_check'] else "✅ OK"}</p>
     <p><a href="/health">health</a></p>
     <hr>
     <h3>Come cambiare filtro:</h3>
     <p>Vai su Vinted, filtra per prezzo, categoria, ecc., copia l'URL tipo:<br>
-    <code>https://www.vinted.it/catalog?catalog[]=3025&price_from=10&price_to=80&order=newest_first</code><br>
+    <code>https://www.vinted.it/catalog?price_from=10&price_to=80&order=newest_first</code><br>
     Incollalo in Render > Environment > VINTED_URL > Save</p>
+    <p><b>Se vedi None:</b> il filtro è troppo restrittivo, prova senza catalog[]=3025</p>
     """
 
 @app.route("/health")
