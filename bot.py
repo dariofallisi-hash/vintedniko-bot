@@ -3,74 +3,85 @@ from urllib.parse import urlparse, parse_qs, urlencode
 from flask import Flask
 import html
 
-SEARCH_TEXT = os.getenv("SEARCH_TEXT", "nintendo switch")
+SEARCH_TEXT = os.getenv("SEARCH_TEXT", "")
 DOMAIN = os.getenv("DOMAIN", "it")
-VINTED_URL = os.getenv("VINTED_URL", "")  # es: https://www.vinted.it/catalog?catalog[]=3025&price_from=10&price_to=80&order=newest_first
+VINTED_URL = os.getenv("VINTED_URL", "")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK", "")
 STORAGE_FILE = "/tmp/vinted_first.json"
 
 try:
     from curl_cffi import requests as c_requests
     USE_CURL = True
-    print("✅ Usando curl_cffi per bypassare blocco Vinted")
+    print("✅ Usando curl_cffi")
 except Exception as e:
     import requests as c_requests
     USE_CURL = False
-    print(f"⚠️ curl_cffi non disponibile ({e})")
+    print(f"⚠️ curl_cffi non disponibile {e}")
 
 import requests as std_requests
 
 app = Flask(__name__)
+last_check_info = {"last_id": None, "last_title": "", "last_check": "", "current_filter": "", "debug": ""}
 
-last_check_info = {"last_id": None, "last_title": "", "last_check": "", "current_filter": ""}
+# Sessione globale per mantenere i cookie di Vinted
+session = None
+
+def get_session():
+    global session
+    if session is None:
+        try:
+            session = c_requests.Session()
+            # Prendi i cookie prima - fondamentale per Vinted
+            print("🍪 Prendo cookie da vinted.it...")
+            kw = {"timeout": 20}
+            if USE_CURL:
+                kw["impersonate"] = "chrome124"
+            # Visita homepage per ottenere cookie anonimi
+            session.get(f"https://www.vinted.{DOMAIN}/", headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml"
+            }, **kw)
+            print(f"✅ Cookie ottenuti: {len(session.cookies)}")
+        except Exception as e:
+            print(f"❌ Errore cookie: {e}")
+            session = c_requests.Session()
+    return session
 
 def build_api_url():
     ts = int(time.time())
     base = f"https://www.vinted.{DOMAIN}/api/v2/catalog/items"
     
-    # Se hai messo VINTED_URL completo, lo parsiamo
     if VINTED_URL:
         parsed = urlparse(VINTED_URL)
         qs = parse_qs(parsed.query)
-        # parse_qs ritorna liste
         api_params = {}
-        # Converti catalog[] -> catalog_ids
         if "catalog[]" in qs:
             api_params["catalog_ids"] = ",".join(qs["catalog[]"])
         if "catalog_ids" in qs:
             api_params["catalog_ids"] = ",".join(qs["catalog_ids"])
-        if "catalog" in qs:
-            api_params["catalog_ids"] = ",".join(qs["catalog"])
-        # Altri filtri comuni
-        for key in ["price_from", "price_to", "currency", "search_text", "order", "brand_ids", "size_ids", "status_ids", "color_ids"]:
+        for key in ["price_from", "price_to", "currency", "search_text", "order", "brand_ids", "size_ids"]:
             if key in qs:
                 api_params[key] = qs[key][0]
-        # Forza newest_first e per_page
         api_params["order"] = "newest_first"
-        api_params["per_page"] = "5"
+        api_params["per_page"] = "20"
         api_params["time"] = str(ts)
-        # Se VINTED_URL è impostato, NON aggiungere search_text di fallback
-        # L'utente vuole filtrare solo per categoria/prezzo. Aggiungi search_text solo se è già nel VINTED_URL
-        # Se invece vuoi anche search_text, mettilo direttamente nel VINTED_URL: &search_text=nintendo+switch
-        
+        # NON aggiungere search_text se non c'è nel link
         query = urlencode(api_params, doseq=True)
         url = f"{base}?{query}"
         referer = VINTED_URL
-        print(f"[{time.strftime('%H:%M:%S')}] 🔗 Uso filtro CUSTOM da VINTED_URL")
-        print(f"   API URL: {url}")
+        print(f"🔗 Filtro CUSTOM: {url}")
         return url, referer
     else:
-        # Vecchio metodo solo search_text
         params = {
-            "search_text": SEARCH_TEXT,
+            "search_text": SEARCH_TEXT or "a",
             "order": "newest_first",
-            "per_page": "5",
+            "per_page": "20",
             "time": str(ts)
         }
         query = urlencode(params)
         url = f"{base}?{query}"
-        referer = f"https://www.vinted.{DOMAIN}/catalog?search_text={SEARCH_TEXT.replace(' ','+')}&order=newest_first"
-        print(f"[{time.strftime('%H:%M:%S')}] 🔗 Uso filtro semplice SEARCH_TEXT='{SEARCH_TEXT}'")
+        referer = f"https://www.vinted.{DOMAIN}/catalog?order=newest_first"
+        print(f"🔗 Filtro fallback SEARCH_TEXT='{SEARCH_TEXT}'")
         return url, referer
 
 def fetch_first():
@@ -80,35 +91,69 @@ def fetch_first():
     h = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "it-IT,it;q=0.9",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": referer,
         "Origin": f"https://www.vinted.{DOMAIN}",
+        "X-Requested-With": "XMLHttpRequest",
     }
     try:
-        kw = {"headers": h, "timeout": 20}
+        sess = get_session()
+        kw = {"headers": h, "timeout": 25}
         if USE_CURL:
             kw["impersonate"] = "chrome124"
-        r = c_requests.get(url, **kw)
-        print(f"[{time.strftime('%H:%M:%S')}] 🌐 Status {r.status_code}")
+        
+        r = sess.get(url, **kw)
+        print(f"[{time.strftime('%H:%M:%S')}] 🌐 Status {r.status_code} - URL: {url[:100]}")
+        
         if r.status_code != 200:
-            print(f"   Body: {r.text[:400]}")
+            print(f"   Body preview: {r.text[:500]}")
+            last_check_info["debug"] = f"Status {r.status_code}: {r.text[:200]}"
+            # Se 401/403, resetta sessione
+            if r.status_code in [401, 403, 429]:
+                global session
+                session = None
             return None
-        data = r.json()
-        items = data.get('items') or []
+        
+        try:
+            data = r.json()
+        except Exception as e:
+            print(f"   Non è JSON! Body: {r.text[:500]}")
+            last_check_info["debug"] = f"Non JSON: {r.text[:200]}"
+            return None
+        
+        # Debug struttura
+        print(f"   Chiavi JSON: {list(data.keys())[:10]}")
+        
+        items = data.get('items') or data.get('data') or []
+        if isinstance(items, dict):
+            items = items.get('items') or items.get('data') or []
+        
+        print(f"   Trovati {len(items)} items")
+        
         if not items:
-            print(f"⚠️ Nessun risultato con questo filtro!")
+            print(f"⚠️ 0 risultati - risposta completa: {str(data)[:800]}")
+            last_check_info["debug"] = f"0 items. Keys: {list(data.keys())} - data: {str(data)[:400]}"
             return None
+        
         f = items[0]
-        price = f.get('price') or f.get('price_numeric') or ""
+        price = f.get('price') or f.get('price_numeric') or f.get('total_item_price') or ""
         if isinstance(price, dict):
             price = price.get('amount') or price.get('text') or ""
+        
         photo = (f.get('photo') or {}).get('url')
         if not photo and f.get('photos'):
-            photo = f['photos'][0].get('url')
+            try:
+                photo = f['photos'][0].get('url') or f['photos'][0].get('thumbnails', [{}])[0].get('url')
+            except: pass
+        
+        # URL prodotto
+        prod_url = f.get('url') or f"https://www.vinted.{DOMAIN}/items/{f.get('id')}"
+        
         return {
             "id": str(f.get('id')),
             "title": f.get('title','Senza titolo'),
-            "url": f.get('url') or f"https://www.vinted.{DOMAIN}/items/{f.get('id')}",
+            "url": prod_url,
             "price": price,
             "photo": photo,
             "api_url": url
@@ -116,31 +161,34 @@ def fetch_first():
     except Exception as e:
         print(f"❌ Errore fetch: {e}")
         import traceback; traceback.print_exc()
+        last_check_info["debug"] = f"Errore: {e}"
         return None
 
 def send_discord(item):
     if not WEBHOOK_URL:
-        print("⚠️ WEBHOOK non impostato")
         return
     embed = {
-        "title": f"🔔 NUOVO IN ALTO!\n{item['title'][:200]}",
+        "title": f"🔔 NUOVO! {item['title'][:180]}",
         "url": item['url'],
-        "description": f"**Prezzo:** {item['price']}€\n**Filtro:** `{VINTED_URL[:80] if VINTED_URL else SEARCH_TEXT}`\n\n🔗 [CLICCA QUI PER COMPRARE]({item['url']})",
+        "description": f"**Prezzo:** {item['price']}€\n**Filtro:** {VINTED_URL[:70] if VINTED_URL else SEARCH_TEXT}\n\n🔗 [COMPRA ORA]({item['url']})",
         "color": 0x09B1BA,
         "image": {"url": item['photo']} if item['photo'] else None,
-        "footer": {"text": f"ID {item['id']} | {item['api_url'][:60]}"}
+        "footer": {"text": f"ID {item['id']}"}
     }
     try:
         std_requests.post(WEBHOOK_URL, json={"embeds":[embed]}, timeout=15)
-        print(f"✅ Inviato su Discord {item['id']}")
+        print(f"✅ Discord inviato {item['id']}")
     except Exception as e:
-        print(f"Discord error {e}")
+        print(f"Discord err {e}")
 
 @app.route("/")
 def home():
-    filtro_display = html.escape(VINTED_URL if VINTED_URL else SEARCH_TEXT)
+    filtro_display = html.escape(VINTED_URL if VINTED_URL else SEARCH_TEXT or "nessuno")
     api_display = html.escape(last_check_info['current_filter'])
     title_display = html.escape(last_check_info['last_title'] or "")
+    debug_display = html.escape(last_check_info.get('debug','')[:500])
+    stato = "✅ OK - Trovato prodotto" if last_check_info['last_id'] else f"❌ {debug_display or 'Nessun risultato - Vinted sta bloccando, riprovo con cookie'}"
+    
     return f"""
     <h1>Vinted Bot Online ✅</h1>
     <p><b>Filtro attivo:</b> {filtro_display}</p>
@@ -148,14 +196,11 @@ def home():
     <p><b>Ultimo check:</b> {html.escape(last_check_info['last_check'])}</p>
     <p><b>Ultimo ID:</b> {html.escape(str(last_check_info['last_id']))} - {title_display}</p>
     <p><b>API URL:</b> {api_display}</p>
-    <p><b>Stato:</b> {"❌ Nessun risultato per questo filtro! Prova a togliere catalog o prezzo" if last_check_info['last_id'] is None and last_check_info['last_check'] else "✅ OK"}</p>
-    <p><a href="/health">health</a></p>
+    <p><b>Stato:</b> {stato}</p>
+    <p><b>Debug:</b> {debug_display}</p>
+    <p><a href="/health">health</a> | <a href="/">refresh</a></p>
     <hr>
-    <h3>Come cambiare filtro:</h3>
-    <p>Vai su Vinted, filtra per prezzo, categoria, ecc., copia l'URL tipo:<br>
-    <code>https://www.vinted.it/catalog?price_from=10&price_to=80&order=newest_first</code><br>
-    Incollalo in Render > Environment > VINTED_URL > Save</p>
-    <p><b>Se vedi None:</b> il filtro è troppo restrittivo, prova senza catalog[]=3025</p>
+    <p>Se vedi sempre None, Vinted blocca Render. Prova link più semplice: <code>?order=newest_first</code></p>
     """
 
 @app.route("/health")
@@ -163,18 +208,17 @@ def health():
     return "OK", 200
 
 def loop_monitor():
-    print(f"🚀 Avvio monitor - DOMAIN=vinted.{DOMAIN} VINTED_URL={VINTED_URL or SEARCH_TEXT}")
+    print(f"🚀 Avvio monitor - VINTED_URL={VINTED_URL or SEARCH_TEXT}")
     last_id = None
     if os.path.exists(STORAGE_FILE):
         try:
             with open(STORAGE_FILE) as f:
                 last_id = json.load(f).get('id')
-                print(f"Riprendo da ID salvato: {last_id}")
         except: pass
 
     if WEBHOOK_URL:
         try:
-            msg = f"✅ Bot avviato!\n**Filtro:** {VINTED_URL if VINTED_URL else SEARCH_TEXT}\nSu vinted.{DOMAIN} - controllo ogni 30s"
+            msg = f"✅ Bot avviato! Filtro: {VINTED_URL or SEARCH_TEXT or 'default'}"
             std_requests.post(WEBHOOK_URL, json={"content": msg}, timeout=10)
         except: pass
 
@@ -186,9 +230,9 @@ def loop_monitor():
             if first:
                 last_check_info["last_id"] = first["id"]
                 last_check_info["last_title"] = first["title"]
-                print(f"[{now}] 🔍 Primo: {first['id']} | {first['title'][:60]} | {first['price']}€")
+                print(f"[{now}] 🔍 {first['id']} | {first['title'][:60]} | {first['price']}€")
                 if first['id'] != last_id:
-                    print(f"[{now}] 🚨 CAMBIO RILEVATO! {last_id} -> {first['id']}")
+                    print(f"[{now}] 🚨 NUOVO! {last_id} -> {first['id']}")
                     send_discord(first)
                     last_id = first['id']
                     try:
@@ -196,11 +240,11 @@ def loop_monitor():
                             json.dump({"id": last_id}, f)
                     except: pass
                 else:
-                    print(f"[{now}] 😴 Nessun cambio")
+                    print(f"[{now}] 😴 uguale")
             else:
                 print(f"[{now}] ⚠️ Nessun dato")
         except Exception as e:
-            print(f"🔥 Errore loop: {e}")
+            print(f"🔥 Loop err: {e}")
         time.sleep(random.randint(25,40))
 
 threading.Thread(target=loop_monitor, daemon=True).start()
