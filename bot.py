@@ -65,6 +65,10 @@ def build_api_url():
         api_params["order"] = "newest_first"
         api_params["per_page"] = "20"
         api_params["time"] = str(ts)
+        # Vinted vuole almeno search_text o catalog_ids, altrimenti da 404
+        # Se l'utente ha messo solo price_from/to senza categoria e senza testo, aggiungiamo search_text generico
+        if "search_text" not in api_params and "catalog_ids" not in api_params:
+            api_params["search_text"] = "a"
         # NON aggiungere search_text se non c'è nel link
         query = urlencode(api_params, doseq=True)
         url = f"{base}?{query}"
